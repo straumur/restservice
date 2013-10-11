@@ -135,7 +135,8 @@ func (r *RESTService) saveHandler(w http.ResponseWriter, req *http.Request) (err
 	} else {
 		w.WriteHeader(http.StatusAccepted)
 	}
-	r.events <- &e
+	//fix block on error
+	go func() { r.events <- &e }()
 	return nil, 0
 }
 
