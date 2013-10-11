@@ -1,4 +1,4 @@
-package rest
+package restservice
 
 //TODO: Better use of errchan
 import (
