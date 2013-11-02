@@ -4,8 +4,8 @@ package restservice
 import (
 	"encoding/json"
 	"errors"
-	"github.com/golang/glog"
 	"github.com/gorilla/mux"
+	"github.com/howbazaar/loggo"
 	"github.com/straumur/straumur"
 	"io"
 	"net/http"
@@ -19,6 +19,7 @@ var (
 	ErrUpdateNonExisting = errors.New("Update non-existing resource")
 	ErrMissingType       = errors.New("Missing type param")
 	ErrInvalidEntity     = errors.New("Invalid entity")
+	logger               = loggo.GetLogger("straumur.rest")
 )
 
 type RESTService struct {
@@ -66,10 +67,10 @@ func handlerWrapper(f func(http.ResponseWriter, *http.Request) (error, int)) htt
 		t := time.Now()
 		err, status := f(w, r)
 
-		glog.V(2).Infof("Processed request: %s:%s in %f", r.Method, r.URL, time.Now().Sub(t).Seconds())
+		logger.Infof("Processed request: %s:%s in %f", r.Method, r.URL, time.Now().Sub(t).Seconds())
 
 		if err != nil {
-			glog.Warningf("Error - [%s]%s, status: %d", r.Method, r.URL, status)
+			logger.Warningf("Error - [%s]%s, status: %d", r.Method, r.URL, status)
 			http.Error(w, err.Error(), status)
 		}
 	}
@@ -212,7 +213,7 @@ func (r *RESTService) Run(d straumur.DataBackend, ec chan error) {
 
 	err = http.ListenAndServe(r.address, nil)
 
-	glog.V(2).Info("Server started")
+	logger.Infof("Server started")
 
 	if err != nil {
 		ec <- err
