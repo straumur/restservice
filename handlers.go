@@ -67,7 +67,7 @@ func handlerWrapper(f func(http.ResponseWriter, *http.Request) (error, int)) htt
 		t := time.Now()
 		err, status := f(w, r)
 
-		logger.Infof("Processed request: %s:%s in %f", r.Method, r.URL, time.Now().Sub(t).Seconds())
+		logger.Infof("Processed request: %s:%s in %f seconds", r.Method, r.URL, time.Now().Sub(t).Seconds())
 
 		if err != nil {
 			logger.Warningf("Error - [%s]%s, status: %d", r.Method, r.URL, status)
@@ -136,6 +136,8 @@ func (r *RESTService) saveHandler(w http.ResponseWriter, req *http.Request) (err
 	} else {
 		w.WriteHeader(http.StatusAccepted)
 	}
+
+	logger.Infof("Saved event for key %s", e.Key)
 	//fix block on error
 	go func() { r.events <- &e }()
 	return nil, 0
