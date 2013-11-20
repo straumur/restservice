@@ -68,7 +68,7 @@ func startServer() {
 	http.Handle("/", rest)
 
 	server := httptest.NewServer(nil)
-	serverAddr = server.Listener.Addr().String()
+	serverAddr = server.Listener.Addr().String() + "/api"
 	broadcaster = rest.WsServer
 
 	go func() {
