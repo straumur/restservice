@@ -132,7 +132,7 @@ func (r *RESTService) entityHandler(w http.ResponseWriter, req *http.Request) (e
 	}
 	enc := json.NewEncoder(w)
 	enc.Encode(events)
-	go r.updateListener(req.Header.Get("X-User-Id"), q)
+	r.WsServer.Filters <- FilterPair{req.Header.Get("X-User-Id"), *q, 1}
 	return nil, http.StatusOK
 }
 
@@ -195,7 +195,7 @@ func (r *RESTService) searchHandler(w http.ResponseWriter, req *http.Request) (e
 	}
 	enc := json.NewEncoder(w)
 	enc.Encode(events)
-	go r.updateListener(req.Header.Get("X-User-Id"), q)
+	r.WsServer.Filters <- FilterPair{req.Header.Get("X-User-Id"), *q, 1}
 	return nil, http.StatusOK
 }
 
@@ -217,17 +217,7 @@ func (r *RESTService) aggregateHandler(w http.ResponseWriter, req *http.Request)
 
 	enc := json.NewEncoder(w)
 	enc.Encode(m)
-	go r.updateListener(req.Header.Get("X-User-Id"), q)
 	return nil, http.StatusOK
-}
-
-func (r *RESTService) updateListener(clientId string, q *straumur.Query) {
-	c := r.WsServer.FindClientById(clientId)
-	if c != nil {
-		c.query = *q
-	}
-	logger.Infof("Updating WS Client: %s, %+v", clientId, c)
-	return
 }
 
 func (r *RESTService) ServeHTTP(w http.ResponseWriter, req *http.Request) {
@@ -237,13 +227,14 @@ func (r *RESTService) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 func (r *RESTService) getRouter() *mux.Router {
 	router := mux.NewRouter()
-	router.HandleFunc("/{entity}/{id}/", r.Middleware(r.entityHandler)).Methods("GET")
-	router.HandleFunc("/", r.Middleware(r.saveHandler)).Methods("POST")
-	router.HandleFunc("/{id}/", r.Middleware(r.retrieveHandler)).Methods("GET")
-	router.HandleFunc("/{id}/", r.Middleware(r.saveHandler)).Methods("PUT")
-	router.HandleFunc("/search", r.Middleware(r.searchHandler)).Methods("GET")
-	router.HandleFunc("/aggregate/{type}", r.Middleware(r.aggregateHandler)).Methods("GET")
-	router.Handle("/ws", r.WsServer.GetHandler())
+	s := router.PathPrefix("/api").Subrouter()
+	s.HandleFunc("/{entity}/{id}/", r.Middleware(r.entityHandler)).Methods("GET")
+	s.HandleFunc("/", r.Middleware(r.saveHandler)).Methods("POST")
+	s.HandleFunc("/{id}/", r.Middleware(r.retrieveHandler)).Methods("GET")
+	s.HandleFunc("/{id}/", r.Middleware(r.saveHandler)).Methods("PUT")
+	s.HandleFunc("/search", r.Middleware(r.searchHandler)).Methods("GET")
+	s.HandleFunc("/aggregate/{type}", r.Middleware(r.aggregateHandler)).Methods("GET")
+	s.HandleFunc("/ws", r.AddSessionIdHeader(r.WsServer.GetHandler().ServeHTTP))
 	return router
 }
 
