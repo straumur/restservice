@@ -5,12 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/gorilla/mux"
+	"github.com/gorilla/sessions"
 	"github.com/howbazaar/loggo"
+	"github.com/nu7hatch/gouuid"
 	"github.com/straumur/straumur"
 	"io"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 )
 
@@ -20,13 +21,17 @@ var (
 	ErrMissingType       = errors.New("Missing type param")
 	ErrInvalidEntity     = errors.New("Invalid entity")
 	logger               = loggo.GetLogger("straumur.rest")
+	sessionName          = "straumur"
+	clientVarName        = "client-id"
 )
 
 type RESTService struct {
+	Headers     map[string]string
+	Store       sessions.Store
 	databackend straumur.DataBackend
-	address     string
-	prefix      string
 	events      chan *straumur.Event
+	WsServer    *WebSocketServer
+	errchan     chan error
 }
 
 // Returns the entity prefix
@@ -55,25 +60,59 @@ func (r *RESTService) parseEvent(body io.ReadCloser) (straumur.Event, error) {
 	return e, err
 }
 
+// Appends a unique session id to the request headers
+func (r *RESTService) AddSessionIdHeader(f func(http.ResponseWriter, *http.Request)) http.HandlerFunc {
+
+	return func(w http.ResponseWriter, req *http.Request) {
+
+		session, err := r.Store.Get(req, sessionName)
+		if err != nil {
+			logger.Errorf("%v", err)
+		}
+
+		cidi, ok := session.Values[clientVarName]
+		cid := ""
+
+		if !ok {
+			logger.Infof("New session")
+			u4, err := uuid.NewV4()
+			if err != nil {
+				logger.Errorf("%v", err)
+			}
+			cid = u4.String()
+			session.Values[clientVarName] = cid
+			session.Save(req, w)
+		} else {
+			cid = cidi.(string)
+		}
+
+		req.Header.Add("X-User-Id", cid)
+		f(w, req)
+	}
+
+}
+
 // Wraps http.HandlerFunc, adds error response and frequently used headers
-func handlerWrapper(f func(http.ResponseWriter, *http.Request) (error, int)) http.HandlerFunc {
+func (r *RESTService) Middleware(f func(http.ResponseWriter, *http.Request) (error, int)) http.HandlerFunc {
 
-	return func(w http.ResponseWriter, r *http.Request) {
+	v := func(w http.ResponseWriter, req *http.Request) {
 
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept")
+		for k, v := range r.Headers {
+			w.Header().Set(k, v)
+		}
 
 		t := time.Now()
-		err, status := f(w, r)
+		err, status := f(w, req)
 
-		logger.Infof("Processed request: %s:%s in %f seconds", r.Method, r.URL, time.Now().Sub(t).Seconds())
+		logger.Infof("Processed request: %s:%s in %f seconds", req.Method, req.URL, time.Now().Sub(t).Seconds())
 
 		if err != nil {
-			logger.Warningf("Error - [%s]%s, status: %d", r.Method, r.URL, status)
+			logger.Warningf("Error - [%s]%s, status: %d", req.Method, req.URL, status)
 			http.Error(w, err.Error(), status)
 		}
 	}
+
+	return r.AddSessionIdHeader(v)
 }
 
 // GET: /api/entity/id/
@@ -93,6 +132,7 @@ func (r *RESTService) entityHandler(w http.ResponseWriter, req *http.Request) (e
 	}
 	enc := json.NewEncoder(w)
 	enc.Encode(events)
+	go r.updateListener(req.Header.Get("X-User-Id"), q)
 	return nil, http.StatusOK
 }
 
@@ -155,6 +195,7 @@ func (r *RESTService) searchHandler(w http.ResponseWriter, req *http.Request) (e
 	}
 	enc := json.NewEncoder(w)
 	enc.Encode(events)
+	go r.updateListener(req.Header.Get("X-User-Id"), q)
 	return nil, http.StatusOK
 }
 
@@ -176,51 +217,53 @@ func (r *RESTService) aggregateHandler(w http.ResponseWriter, req *http.Request)
 
 	enc := json.NewEncoder(w)
 	enc.Encode(m)
+	go r.updateListener(req.Header.Get("X-User-Id"), q)
 	return nil, http.StatusOK
 }
 
-func (r *RESTService) getRouter() (*mux.Router, error) {
+func (r *RESTService) updateListener(clientId string, q *straumur.Query) {
+	c := r.WsServer.FindClientById(clientId)
+	if c != nil {
+		c.query = *q
+	}
+	logger.Infof("Updating WS Client: %s, %+v", clientId, c)
+	return
+}
 
+func (r *RESTService) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	router := r.getRouter()
+	router.ServeHTTP(w, req)
+}
+
+func (r *RESTService) getRouter() *mux.Router {
 	router := mux.NewRouter()
-	s := router.PathPrefix(r.prefix).Subrouter()
-	s.HandleFunc("/{entity}/{id}/", handlerWrapper(r.entityHandler)).Methods("GET")
-	s.HandleFunc("/", handlerWrapper(r.saveHandler)).Methods("POST")
-	s.HandleFunc("/{id}/", handlerWrapper(r.retrieveHandler)).Methods("GET")
-	s.HandleFunc("/{id}/", handlerWrapper(r.saveHandler)).Methods("PUT")
-	s.HandleFunc("/search", handlerWrapper(r.searchHandler)).Methods("GET")
-	s.HandleFunc("/aggregate/{type}", handlerWrapper(r.aggregateHandler)).Methods("GET")
-	return router, nil
+	router.HandleFunc("/{entity}/{id}/", r.Middleware(r.entityHandler)).Methods("GET")
+	router.HandleFunc("/", r.Middleware(r.saveHandler)).Methods("POST")
+	router.HandleFunc("/{id}/", r.Middleware(r.retrieveHandler)).Methods("GET")
+	router.HandleFunc("/{id}/", r.Middleware(r.saveHandler)).Methods("PUT")
+	router.HandleFunc("/search", r.Middleware(r.searchHandler)).Methods("GET")
+	router.HandleFunc("/aggregate/{type}", r.Middleware(r.aggregateHandler)).Methods("GET")
+	router.Handle("/ws", r.WsServer.GetHandler())
+	return router
 }
 
 // Creates a new REST dataservice
-func NewRESTService(prefix string, address string) *RESTService {
-	return &RESTService{
-		prefix:  strings.TrimRight(prefix, "/"),
-		address: address,
-		events:  make(chan *straumur.Event),
+func NewRESTService(d straumur.DataBackend, errorChan chan error) *RESTService {
+
+	defaultHeaders := make(map[string]string)
+	defaultHeaders["Content-Type"] = "application/json; charset=utf-8"
+	defaultHeaders["Access-Control-Allow-Origin"] = "*"
+	defaultHeaders["Access-Control-Allow-Headers"] = "Origin, X-Requested-With, Content-Type, Accept"
+
+	rs := RESTService{
+		Headers:     defaultHeaders,
+		WsServer:    NewWebSocketServer(),
+		events:      make(chan *straumur.Event),
+		databackend: d,
+		errchan:     errorChan,
 	}
-}
-
-//DataService interface
-func (r *RESTService) Run(d straumur.DataBackend, ec chan error) {
-
-	r.databackend = d
-
-	router, err := r.getRouter()
-	if err != nil {
-		ec <- err
-	}
-
-	http.Handle(r.prefix+"/", router)
-
-	err = http.ListenAndServe(r.address, nil)
-
-	logger.Infof("Server started")
-
-	if err != nil {
-		ec <- err
-	}
-
+	go rs.WsServer.Run(errorChan)
+	return &rs
 }
 
 //EventFeed interface
