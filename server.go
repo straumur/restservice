@@ -4,6 +4,7 @@ import (
 	"code.google.com/p/go.net/websocket"
 	"github.com/straumur/straumur"
 	"net/http"
+	"time"
 )
 
 type WebSocketServer struct {
@@ -13,6 +14,13 @@ type WebSocketServer struct {
 	delCh   chan *Client
 	doneCh  chan bool
 	errCh   chan error
+	Filters chan FilterPair
+}
+
+type FilterPair struct {
+	Id       string
+	Query    straumur.Query
+	Attempts int
 }
 
 // Create a new Websocket broadcaster
@@ -24,6 +32,7 @@ func NewWebSocketServer() *WebSocketServer {
 	doneCh := make(chan bool)
 	errCh := make(chan error)
 	events := make(chan *straumur.Event)
+	filters := make(chan FilterPair)
 
 	return &WebSocketServer{
 		events,
@@ -32,6 +41,7 @@ func NewWebSocketServer() *WebSocketServer {
 		delCh,
 		doneCh,
 		errCh,
+		filters,
 	}
 }
 
@@ -53,7 +63,7 @@ func (s *WebSocketServer) Err(err error) {
 
 func (s *WebSocketServer) sendAll(event *straumur.Event) {
 	for _, c := range s.clients {
-		logger.Debugf("%+v", c.query)
+		logger.Infof("%s %+v", c.Id, c.query)
 		if c.query.Match(*event) {
 			c.Write(event)
 		}
@@ -87,7 +97,6 @@ func (s *WebSocketServer) GetHandler() http.Handler {
 
 func (s *WebSocketServer) FindClientById(uuid string) *Client {
 	for idx, c := range s.clients {
-		logger.Infof("Que? %s, %s", c.Id, uuid)
 		if c.Id == uuid {
 			return s.clients[idx]
 		}
@@ -105,6 +114,26 @@ func (s *WebSocketServer) Run(ec chan error) {
 			logger.Debugf("Added new client")
 			s.clients[c.Id] = c
 			logger.Debugf("Now", len(s.clients), "clients connected.")
+
+		// Attempt to pair the filter with the websocket connection,
+		// requeue in case the client hasn't been added or isn't using
+		// websockets
+		case filter := <-s.Filters:
+			client := s.FindClientById(filter.Id)
+			if client != nil {
+				logger.Infof("Client filter matched %s", client.Id)
+				client.query = filter.Query
+			} else {
+				if filter.Attempts < 3 {
+					time.AfterFunc(2*time.Second, func() {
+						logger.Infof("Requeing %+v", filter)
+						filter.Attempts++
+						s.Filters <- filter
+					})
+				} else {
+					logger.Infof("Dropping %+v", filter)
+				}
+			}
 
 		// del a client
 		case c := <-s.delCh:
