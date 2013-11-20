@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/google/go-querystring/query"
+	"github.com/gorilla/sessions"
 	"github.com/straumur/straumur"
 	"log"
 	"net/http"
+	"net/http/cookiejar"
+	"net/http/httptest"
 	"sync"
 	"testing"
 )
@@ -18,6 +21,7 @@ var client *http.Client
 var firstEvent *straumur.Event
 var secondEvent *straumur.Event
 var errChan chan error
+var broadcaster straumur.Broadcaster
 
 func startServer() {
 
@@ -58,9 +62,14 @@ func startServer() {
 		panic(err)
 	}
 
-	serverAddr = "localhost:14234/api"
-	rest := NewRESTService("/api", ":14234")
-	go rest.Run(d, errChan)
+	rest := NewRESTService(d, errChan)
+	rest.Store = sessions.NewCookieStore([]byte("something-very-secret"))
+
+	http.Handle("/", rest)
+
+	server := httptest.NewServer(nil)
+	serverAddr = server.Listener.Addr().String()
+	broadcaster = rest.WsServer
 
 	go func() {
 		for {
@@ -82,6 +91,11 @@ func startServer() {
 
 	log.Print("Test Server running on ", serverAddr)
 	client = http.DefaultClient
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		panic(err)
+	}
+	client.Jar = jar
 	log.Print("Test Client created")
 }
 
